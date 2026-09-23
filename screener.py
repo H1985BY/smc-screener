@@ -1,4 +1,484 @@
-from functools import wraps
+                else:
+                    if ((not close_mitigation and _high[close_index] > top_arr[idx])
+                        or (close_mitigation and max(_open[close_index], _close[close_index]) > top_arr[idx])):
+                        breaker[idx] = True
+                        mitigated_index[idx] = close_index
+
+            # Find last swing low index less than current candle
+            pos = np.searchsorted(swing_low_indices, close_index)
+            last_btm_index = swing_low_indices[pos - 1] if pos > 0 else None
+
+            if last_btm_index is not None:
+                if _close[close_index] < _low[last_btm_index] and not crossed[last_btm_index]:
+                    crossed[last_btm_index] = True
+                    default_index = close_index - 1
+                    obTop = _high[default_index]
+                    obBtm = _low[default_index]
+                    obIndex = default_index
+                    if close_index - last_btm_index > 1:
+                        start = last_btm_index + 1
+                        end = close_index
+                        if end > start:
+                            segment = _high[start:end]
+                            max_val = segment.max()
+                            candidates = np.nonzero(segment == max_val)[0]
+                            if candidates.size:
+                                candidate_index = start + candidates[-1]
+                                obTop = _high[candidate_index]
+                                obBtm = _low[candidate_index]
+                                obIndex = candidate_index
+                    ob[obIndex] = -1
+                    top_arr[obIndex] = obTop
+                    bottom_arr[obIndex] = obBtm
+                    vol_cur = _volume[close_index]
+                    vol_prev1 = _volume[close_index - 1] if close_index >= 1 else 0.0
+                    vol_prev2 = _volume[close_index - 2] if close_index >= 2 else 0.0
+                    obVolume[obIndex] = vol_cur + vol_prev1 + vol_prev2
+                    lowVolume[obIndex] = vol_cur + vol_prev1
+                    highVolume[obIndex] = vol_prev2
+                    max_vol = max(highVolume[obIndex], lowVolume[obIndex])
+                    percentage[obIndex] = (min(highVolume[obIndex], lowVolume[obIndex]) / max_vol * 100.0) if max_vol != 0 else 100.0
+                    active_bearish.append(obIndex)
+
+        # Convert zeros to NaN where OB was not set
+        ob = np.where(ob != 0, ob, np.nan)
+        top_arr = np.where(~np.isnan(ob), top_arr, np.nan)
+        bottom_arr = np.where(~np.isnan(ob), bottom_arr, np.nan)
+        obVolume = np.where(~np.isnan(ob), obVolume, np.nan)
+        mitigated_index = np.where(~np.isnan(ob), mitigated_index, np.nan)
+        percentage = np.where(~np.isnan(ob), percentage, np.nan)
+
+        ob_series = pd.Series(ob, name="OB")
+        top_series = pd.Series(top_arr, name="Top")
+        bottom_series = pd.Series(bottom_arr, name="Bottom")
+        obVolume_series = pd.Series(obVolume, name="OBVolume")
+        mitigated_index_series = pd.Series(mitigated_index, name="MitigatedIndex")
+        percentage_series = pd.Series(percentage, name="Percentage")
+
+        return pd.concat(
+            [
+                ob_series,
+                top_series,
+                bottom_series,
+                obVolume_series,
+                mitigated_index_series,
+                percentage_series,
+            ],
+            axis=1,
+        )
+
+    @classmethod
+    def liquidity(cls, ohlc: DataFrame, swing_highs_lows: DataFrame, range_percent: float = 0.01) -> Series:
+        """
+        Liquidity
+        Liquidity is when there are multiple highs within a small range of each other,
+        or multiple lows within a small range of each other.
+
+        parameters:
+        swing_highs_lows: DataFrame - provide the dataframe from the swing_highs_lows function
+        range_percent: float - the percentage of the range to determine liquidity
+
+        returns:
+        Liquidity = 1 if bullish liquidity, -1 if bearish liquidity
+        Level = the level of the liquidity
+        End = the index of the last liquidity level
+        Swept = the index of the candle that swept the liquidity
+        """
+
+        # Work on a copy so the original is not modified.
+        shl = swing_highs_lows.copy()
+        n = len(ohlc)
+
+        # Calculate the pip range based on the overall high-low range.
+        pip_range = (ohlc["high"].max() - ohlc["low"].min()) * range_percent
+
+        # Preconvert required columns to numpy arrays.
+        ohlc_high = ohlc["high"].values
+        ohlc_low = ohlc["low"].values
+        # Make a copy to allow in-place marking of used candidates.
+        shl_HL = shl["HighLow"].values.copy()
+        shl_Level = shl["Level"].values.copy()
+
+        # Initialise output arrays with NaN (to match later replacement of zeros).
+        liquidity = np.full(n, np.nan, dtype=np.float32)
+        liquidity_level = np.full(n, np.nan, dtype=np.float32)
+        liquidity_end = np.full(n, np.nan, dtype=np.float32)
+        liquidity_swept = np.full(n, np.nan, dtype=np.float32)
+
+        # Process bullish liquidity (HighLow == 1)
+        bull_indices = np.nonzero(shl_HL == 1)[0]
+        for i in bull_indices:
+            # Skip if this candidate has already been used.
+            if shl_HL[i] != 1:
+                continue
+            high_level = shl_Level[i]
+            range_low = high_level - pip_range
+            range_high = high_level + pip_range
+            group_levels = [high_level]
+            group_end = i
+
+            # Determine the swept index:
+            # Find the first candle after i where the high reaches or exceeds range_high.
+            c_start = i + 1
+            if c_start < n:
+                cond = ohlc_high[c_start:] >= range_high
+                if np.any(cond):
+                    swept = c_start + int(np.argmax(cond))
+                else:
+                    swept = 0
+            else:
+                swept = 0
+
+            # Iterate only over candidate indices greater than i.
+            for j in bull_indices:
+                if j <= i:
+                    continue
+                # Emulate the inner loop break: if we've reached or passed the swept index, stop.
+                if swept and j >= swept:
+                    break
+                # If candidate j is within the liquidity range, add it and mark it as used.
+                if shl_HL[j] == 1 and (range_low <= shl_Level[j] <= range_high):
+                    group_levels.append(shl_Level[j])
+                    group_end = j
+                    shl_HL[j] = 0  # mark candidate as used
+            # Only record liquidity if more than one candidate is grouped.
+            if len(group_levels) > 1:
+                avg_level = sum(group_levels) / len(group_levels)
+                liquidity[i] = 1
+                liquidity_level[i] = avg_level
+                liquidity_end[i] = group_end
+                liquidity_swept[i] = swept
+
+        # Process bearish liquidity (HighLow == -1)
+        bear_indices = np.nonzero(shl_HL == -1)[0]
+        for i in bear_indices:
+            if shl_HL[i] != -1:
+                continue
+            low_level = shl_Level[i]
+            range_low = low_level - pip_range
+            range_high = low_level + pip_range
+            group_levels = [low_level]
+            group_end = i
+
+            # Find the first candle after i where the low reaches or goes below range_low.
+            c_start = i + 1
+            if c_start < n:
+                cond = ohlc_low[c_start:] <= range_low
+                if np.any(cond):
+                    swept = c_start + int(np.argmax(cond))
+                else:
+                    swept = 0
+            else:
+                swept = 0
+
+            for j in bear_indices:
+                if j <= i:
+                    continue
+                if swept and j >= swept:
+                    break
+                if shl_HL[j] == -1 and (range_low <= shl_Level[j] <= range_high):
+                    group_levels.append(shl_Level[j])
+                    group_end = j
+                    shl_HL[j] = 0
+            if len(group_levels) > 1:
+                avg_level = sum(group_levels) / len(group_levels)
+                liquidity[i] = -1
+                liquidity_level[i] = avg_level
+                liquidity_end[i] = group_end
+                liquidity_swept[i] = swept
+
+        # Convert arrays to Series with the proper names.
+        liq_series = pd.Series(liquidity, name="Liquidity")
+        level_series = pd.Series(liquidity_level, name="Level")
+        end_series = pd.Series(liquidity_end, name="End")
+        swept_series = pd.Series(liquidity_swept, name="Swept")
+
+        return pd.concat([liq_series, level_series, end_series, swept_series], axis=1)
+
+    @classmethod
+    def previous_high_low(cls, ohlc: DataFrame, time_frame: str = "1D") -> DataFrame:
+        """
+        Previous High Low
+        This method returns the previous high and low of the given time frame.
+
+        parameters:
+        time_frame: str - the time frame to get the previous high and low 15m, 1H, 4H, 1D, 1W, 1M
+
+        returns:
+        PreviousHigh = the previous high
+        PreviousLow = the previous low
+        BrokenHigh = 1 once price has broken the previous high of the timeframe, 0 otherwise
+        BrokenLow = 1 once price has broken the previous low of the timeframe, 0 otherwise
+        """
+        ohlc = ohlc.copy()
+        ohlc.index = pd.to_datetime(ohlc.index)
+        n = len(ohlc)
+
+        # Resample to target timeframe
+        resampled = ohlc.resample(time_frame).agg({
+            "open": "first",
+            "high": "max",
+            "low": "min",
+            "close": "last",
+            "volume": "sum"
+        }).dropna()
+
+        # Edge case: not enough resampled periods
+        if len(resampled) < 2:
+            return pd.concat([
+                pd.Series(np.full(n, np.nan, dtype=np.float32), name="PreviousHigh"),
+                pd.Series(np.full(n, np.nan, dtype=np.float32), name="PreviousLow"),
+                pd.Series(np.zeros(n, dtype=np.int32), name="BrokenHigh"),
+                pd.Series(np.zeros(n, dtype=np.int32), name="BrokenLow"),
+            ], axis=1)
+
+        resampled_times = resampled.index.values
+        resampled_highs = resampled["high"].values
+        resampled_lows = resampled["low"].values
+        candle_times = ohlc.index.values
+
+        # For each candle, find how many resampled periods have start time < candle time
+        # This is equivalent to: len(np.where(resampled_times < candle_time)[0])
+        periods_before = np.searchsorted(resampled_times, candle_times, side='left')
+
+        # Original takes second-to-last: indices[-2] = periods_before - 2
+        prev_period_idx = periods_before - 2
+
+        # Valid only if more than 1 period before (original: len > 1, i.e., >= 2 periods)
+        valid_mask = periods_before > 1
+
+        # Initialize output arrays
+        previous_high = np.full(n, np.nan, dtype=np.float32)
+        previous_low = np.full(n, np.nan, dtype=np.float32)
+
+        # Fill valid entries
+        valid_indices = np.where(valid_mask)[0]
+        if len(valid_indices) > 0:
+            lookup_indices = prev_period_idx[valid_indices]
+            previous_high[valid_indices] = resampled_highs[lookup_indices]
+            previous_low[valid_indices] = resampled_lows[lookup_indices]
+
+        # Group candles by their reference period for cumulative broken tracking
+        # Original resets broken flags when the reference period changes
+        group_changes = np.concatenate([[True], prev_period_idx[1:] != prev_period_idx[:-1]])
+        group_id = np.cumsum(group_changes)
+
+        ohlc_high = ohlc["high"].values
+        ohlc_low = ohlc["low"].values
+
+        # Compute cumulative max/min within each group
+        df_temp = pd.DataFrame({
+            'group': group_id,
+            'high': ohlc_high,
+            'low': ohlc_low,
+        })
+
+        cummax_high = df_temp.groupby('group')['high'].cummax().values
+        cummin_low = df_temp.groupby('group')['low'].cummin().values
+
+        # Broken = 1 if cumulative high > previous_high (or cummin < previous_low)
+        broken_high = np.where(valid_mask & (cummax_high > previous_high), 1, 0).astype(np.int32)
+        broken_low = np.where(valid_mask & (cummin_low < previous_low), 1, 0).astype(np.int32)
+
+        return pd.concat([
+            pd.Series(previous_high, name="PreviousHigh"),
+            pd.Series(previous_low, name="PreviousLow"),
+            pd.Series(broken_high, name="BrokenHigh"),
+            pd.Series(broken_low, name="BrokenLow"),
+        ], axis=1)
+
+    @classmethod
+    def sessions(
+        cls,
+        ohlc: DataFrame,
+        session: str,
+        start_time: str = "",
+        end_time: str = "",
+        time_zone: str = "UTC",
+    ) -> Series:
+        """
+        Sessions
+        This method returns wwhich candles are within the session specified
+
+        parameters:
+        session: str - the session you want to check (Sydney, Tokyo, London, New York, Asian kill zone, London open kill zone, New York kill zone, london close kill zone, Custom)
+        start_time: str - the start time of the session in the format "HH:MM" only required for custom session.
+        end_time: str - the end time of the session in the format "HH:MM" only required for custom session.
+        time_zone: str - the time zone of the candles can be in the format "UTC+0" or "GMT+0"
+
+        returns:
+        Active = 1 if the candle is within the session, 0 if not
+        High = the highest point of the session
+        Low = the lowest point of the session
+        """
+
+        if session == "Custom" and (start_time == "" or end_time == ""):
+            raise ValueError("Custom session requires a start and end time")
+
+        default_sessions = {
+            "Sydney": {
+                "start": "21:00",
+                "end": "06:00",
+            },
+            "Tokyo": {
+                "start": "00:00",
+                "end": "09:00",
+            },
+            "London": {
+                "start": "07:00",
+                "end": "16:00",
+            },
+            "New York": {
+                "start": "13:00",
+                "end": "22:00",
+            },
+            "Asian kill zone": {
+                "start": "00:00",
+                "end": "04:00",
+            },
+            "London open kill zone": {
+                "start": "6:00",
+                "end": "9:00",
+            },
+            "New York kill zone": {
+                "start": "11:00",
+                "end": "14:00",
+            },
+            "london close kill zone": {
+                "start": "14:00",
+                "end": "16:00",
+            },
+            "Custom": {
+                "start": start_time,
+                "end": end_time,
+            },
+        }
+
+        ohlc.index = pd.to_datetime(ohlc.index)
+        if time_zone != "UTC":
+            time_zone = time_zone.replace("GMT", "Etc/GMT")
+            time_zone = time_zone.replace("UTC", "Etc/GMT")
+            ohlc.index = ohlc.index.tz_localize(time_zone).tz_convert("UTC")
+
+        start_time = datetime.strptime(
+            default_sessions[session]["start"], "%H:%M"
+        ).strftime("%H:%M")
+        start_time = datetime.strptime(start_time, "%H:%M")
+        end_time = datetime.strptime(
+            default_sessions[session]["end"], "%H:%M"
+        ).strftime("%H:%M")
+        end_time = datetime.strptime(end_time, "%H:%M")
+
+        # if the candles are between the start and end time then it is an active session
+        active = np.zeros(len(ohlc), dtype=np.int32)
+        high = np.zeros(len(ohlc), dtype=np.float32)
+        low = np.zeros(len(ohlc), dtype=np.float32)
+
+        for i in range(len(ohlc)):
+            current_time = ohlc.index[i].strftime("%H:%M")
+            # convert current time to the second of the day
+            current_time = datetime.strptime(current_time, "%H:%M")
+            if (start_time < end_time and start_time <= current_time <= end_time) or (
+                start_time >= end_time
+                and (start_time <= current_time or current_time <= end_time)
+            ):
+                active[i] = 1
+                high[i] = max(ohlc["high"].iloc[i], high[i - 1] if i > 0 else 0)
+                low[i] = min(
+                    ohlc["low"].iloc[i],
+                    low[i - 1] if i > 0 and low[i - 1] != 0 else float("inf"),
+                )
+
+        active = pd.Series(active, name="Active")
+        high = pd.Series(high, name="High")
+        low = pd.Series(low, name="Low")
+
+        return pd.concat([active, high, low], axis=1)
+
+    @classmethod
+    def retracements(cls, ohlc: DataFrame, swing_highs_lows: DataFrame) -> Series:
+        """
+        Retracement
+        This method returns the percentage of a retracement from the swing high or low
+
+        parameters:
+        swing_highs_lows: DataFrame - provide the dataframe from the swing_highs_lows function
+
+        returns:
+        Direction = 1 if bullish retracement, -1 if bearish retracement
+        CurrentRetracement% = the current retracement percentage from the swing high or low
+        DeepestRetracement% = the deepest retracement percentage from the swing high or low
+        """
+
+        swing_highs_lows = swing_highs_lows.copy()
+
+        direction = np.zeros(len(ohlc), dtype=np.int32)
+        current_retracement = np.zeros(len(ohlc), dtype=np.float64)
+        deepest_retracement = np.zeros(len(ohlc), dtype=np.float64)
+
+        top = 0
+        bottom = 0
+        for i in range(len(ohlc)):
+            if swing_highs_lows["HighLow"][i] == 1:
+                direction[i] = 1
+                top = swing_highs_lows["Level"][i]
+                # deepest_retracement[i] = 0
+            elif swing_highs_lows["HighLow"][i] == -1:
+                direction[i] = -1
+                bottom = swing_highs_lows["Level"][i]
+                # deepest_retracement[i] = 0
+            else:
+                direction[i] = direction[i - 1] if i > 0 else 0
+
+            if direction[i - 1] == 1:
+                divisor = top - bottom
+                current_retracement[i] = round(
+                    100 - (((ohlc["low"].iloc[i] - bottom) / divisor) * 100) if divisor != 0 else 0, 1
+                )
+                deepest_retracement[i] = max(
+                    (
+                        deepest_retracement[i - 1]
+                        if i > 0 and direction[i - 1] == 1
+                        else 0
+                    ),
+                    current_retracement[i],
+                )
+            if direction[i] == -1:
+                divisor = bottom - top
+                current_retracement[i] = round(
+                    100 - ((ohlc["high"].iloc[i] - top) / divisor) * 100 if divisor != 0 else 0, 1
+                )
+                deepest_retracement[i] = max(
+                    (
+                        deepest_retracement[i - 1]
+                        if i > 0 and direction[i - 1] == -1
+                        else 0
+                    ),
+                    current_retracement[i],
+                )
+
+        # shift the arrays by 1
+        current_retracement = np.roll(current_retracement, 1)
+        deepest_retracement = np.roll(deepest_retracement, 1)
+        direction = np.roll(direction, 1)
+
+        # remove the first 3 retracements as they get calculated incorrectly due to not enough data
+        remove_first_count = 0
+        for i in range(len(direction)):
+            if i + 1 == len(direction):
+                break
+            if direction[i] != direction[i + 1]:
+                remove_first_count += 1
+            direction[i] = 0
+            current_retracement[i] = 0
+            deepest_retracement[i] = 0
+            if remove_first_count == 3:
+                direction[i + 1] = 0
+                current_retracement[i + 1] = 0
+                deepest_retracement[i + 1] = 0
+                break
+
+        direction = pd.Series(direction, name="Directifrom functools import wraps
 import pandas as pd
 import numpy as np
 from pandas import DataFrame, Series
