@@ -7,7 +7,7 @@ from datetime import datetime
 import ccxt
 import telebot
 
-# --- Telegram Bot Configuration (Pre-configured) ---
+# --- Telegram Bot Configuration  ---
 TOKEN = "8324901108:AAHb6wVr2Ta8hfC0a5ZlPnG_z_SGwUlop34"
 CHAT_ID = "6172553941"  # ඔබේ පරණ Chat ID එක මෙහි ඇත
 
