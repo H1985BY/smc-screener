@@ -1,4 +1,4 @@
-send_telegram_alert("🔥 Test Alert: SMC Screener is successfully running!")
+
 from functools import wraps
 import pandas as pd
 import numpy as np
@@ -494,4 +494,4 @@ class smc:
                 if swept and j >= swept:
                     break
                 if shl_HL[j] == -1 and (range_low <= shl_Level[j] <= range_high):
-                    group_levels.append
+                    group_levels.appendsend_telegram_alert("🔥 Test Alert: SMC Screener is successfully running!")
