@@ -1,3 +1,4 @@
+send_telegram_alert("🔥 Test Alert: SMC Screener is successfully running!")
 from functools import wraps
 import pandas as pd
 import numpy as np
