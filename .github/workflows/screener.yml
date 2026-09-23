@@ -17,6 +17,12 @@ jobs:
         with:
           python-version: '3.10'
 
+      # 🔥 අන්න මේ පියවර (Step) එක අනිවාර්යයෙන්ම මෙතැනට එකතු කරන්න:
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install pandas numpy ccxt pyTelegramBotAPI
+
       - name: Run Screener Script
         env:
           BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
